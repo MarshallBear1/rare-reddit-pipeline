@@ -2,30 +2,51 @@
 """
 build_ordo_vocab.py
 
-Download the latest ORDO release, extract English labels + synonyms,
-write them to data/ordo_terms.tsv, and save a spaCy EntityRuler model
-into models/model_rare_disease/.
+Download the latest ORDO (rare-disease ontology), extract English labels
++ synonyms, write them to data/ordo_terms.tsv, and save a spaCy
+EntityRuler model in models/model_rare_disease/.
+
+Run once, then re-run only when ORDO updates.
 """
 
-import rdflib, unicodedata, re, csv, pathlib, argparse, spacy, tqdm, requests, tarfile, io
+import pathlib, rdflib, unicodedata, re, csv, requests, tqdm, spacy
 
-ORDO_URL = "https://www.orphadata.com/data/ORDO/ORDO_2025-05.owl"
+# --- CONFIG ---------------------------------------------------------
+
+ORDO_URLS = [
+    # Mirror 1 – Orphadata “last_version” folder
+    "https://www.orphadata.com/data/ontologies/ordo/last_version/ORDO_en_4.5.owl",
+    # Mirror 2 – OBO PURL
+    "https://raw.githubusercontent.com/obophenotype/ORDO/main/ordo.owl",
+]
+
 DATA_DIR  = pathlib.Path("data")
-MODEL_DIR = pathlib.Path("models/model_rare_disease")
+MODEL_DIR = pathlib.Path("models") / "model_rare_disease"
+
+# --------------------------------------------------------------------
 
 def normalise(text: str) -> str:
+    """Lower-case, Unicode-normalise, unify dashes."""
     txt = unicodedata.normalize("NFKD", text)
-    txt = re.sub(r"[‐-–—−]", "-", txt)          # unify dashes
+    txt = re.sub(r"[‐--–—−]", "-", txt)
     return txt.lower()
 
 def download_owl(dest: pathlib.Path):
     if dest.exists():
-        print(f"[✓] ORDO file already present: {dest}")
+        print(f"[✓] ORDO already on disk → {dest}")
         return
-    print(f"[+] Downloading ORDO → {dest}")
-    r = requests.get(ORDO_URL, timeout=90)
-    r.raise_for_status()
-    dest.write_bytes(r.content)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    for url in ORDO_URLS:
+        try:
+            print(f"[+] Fetching {url}")
+            r = requests.get(url, timeout=90)
+            r.raise_for_status()
+            dest.write_bytes(r.content)
+            print("[✓] Downloaded ORDO")
+            return
+        except requests.HTTPError as e:
+            print(f"[!] {e} – trying next mirror")
+    raise RuntimeError("All ORDO mirrors failed – aborting.")
 
 def extract_terms(owl_path: pathlib.Path):
     g = rdflib.Graph().parse(str(owl_path))
@@ -48,19 +69,22 @@ def write_tsv(rows, dest: pathlib.Path):
         w.writerows(rows)
     print(f"[✓] Wrote {len(rows):,} rows → {dest}")
 
-def build_spacy(rows):
+def build_spacy_model(rows):
     nlp = spacy.blank("en")
     ruler = nlp.add_pipe("entity_ruler", config={"validate": True})
-    patterns = [{"label": "RARE_DISEASE", "id": f"ORPHA{oid}", "pattern": term}
-                for oid, term, _ in rows]
-    ruler.add_patterns(patterns)
+    ruler.add_patterns([
+        {"label": "RARE_DISEASE", "id": f"ORPHA{oid}", "pattern": term}
+        for oid, term, _ in rows
+    ])
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     nlp.to_disk(MODEL_DIR)
     print(f"[✓] Saved spaCy model → {MODEL_DIR}")
 
+# --------------------------------------------------------------------
+
 if __name__ == "__main__":
-    owl_file = DATA_DIR / "ORDO_2025-05.owl"
+    owl_file = DATA_DIR / "ORDO_latest.owl"
     download_owl(owl_file)
     term_rows = extract_terms(owl_file)
     write_tsv(term_rows, DATA_DIR / "ordo_terms.tsv")
-    build_spacy(term_rows)
+    build_spacy_model(term_rows)
